@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Simulador de ecuaciones con gráficas</title>
+  <style>
+    body { font-family: Arial; background: #C8E6C9; color:#000; margin:0; }
+    .container { max-width: 900px; margin: auto; padding: 20px; }
+    .card { background: rgba(255,255,255,.9); border-radius: 12px; padding: 16px; margin: 12px 0; }
+    input, select, button { padding: 10px; border-radius: 8px; border: none; font-size: 16px; margin: 5px 0; }
+    button { background:#2575fc; color:#fff; cursor:pointer; }
+    button:hover { background:#6a11cb; color:#fff; }
+    .result { background: rgba(37,117,252,.1); border-radius: 10px; padding: 12px; margin-top: 12px; }
+    canvas { background:#fff; border-radius:10px; margin-top:20px; width:100%; max-width:600px; height:400px; }
+    .error { background:#ff4d4f; color:#fff; padding:8px; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧮 Ecuaciones de primer grado y sistemas 2×2</h1>
+
+    <div class="card">
+      <h2>Ecuación de primer grado (solo x)</h2>
+      <p>Formato: ax + b = c (ej: 3x - 2 = 7, admite fracciones tipo 1/2x).</p>
+      <input id="eq1" placeholder="Ejemplo: 3x - 2 = 7">
+      <button onclick="resolverEcuacion()">Resolver</button>
+      <div id="res-eq1" class="result"></div>
+    </div>
+
+    <div class="card">
+      <h2>Sistema de dos ecuaciones (x, y)</h2>
+      <p>Formato: ax + by = c (ej: 2x+3y=0 y 3x-2y=13, admite fracciones tipo (1/2)x).</p>
+      <input id="sys-eq1" placeholder="Primera ecuación (ej: 2x+3y=0)">
+      <input id="sys-eq2" placeholder="Segunda ecuación (ej: 3x-2y=13)">
+      <select id="metodo">
+        <option value="sustitucion">Sustitución</option>
+        <option value="igualacion">Igualación</option>
+        <option value="reduccion">Reducción</option>
+      </select>
+      <button onclick="resolverSistema()">Resolver sistema</button>
+      <div id="res-sys" class="result"></div>
+    </div>
+
+    <canvas id="grafica" width="600" height="400"></canvas>
+  </div>
+
+  <script>
+    // Formateo inteligente: enteros sin decimales, decimales con 2 cifras
+    function formatNumber(value) {
+      const rounded = Math.round(value * 100) / 100;
+      if (Number.isInteger(rounded)) return rounded.toString();
+      return rounded.toFixed(2);
+    }
+
+    // Números: soporta decimales y fracciones "a/b"
+    function numFromStr(s) {
+      if (!s || s === '+' || s === '-') return 0;
+      if (s.includes('/')) {
+        const [a,b] = s.split('/');
+        return parseFloat(a) / parseFloat(b);
+      }
+      return parseFloat(s);
+    }
+
+    // Tokeniza una expresión sin espacios en términos con signo: [+|-]coef*x, [+|-]coef*y, [+|-]const
+    function parseExprXY(expr) {
+      const s = expr.replace(/\s+/g, '');
+      const terms = s.match(/[+\-]?[^+\-]+/g) || [];
+      let ax = 0, by = 0, ct = 0;
+      for (const t of terms) {
+        if (t.includes('x')) {
+          const coef = t.replace('x','');
+          let c;
+          if (coef === '' || coef === '+') c = 1;
+          else if (coef === '-') c = -1;
+          else c = numFromStr(coef);
+          ax += c;
+        } else if (t.includes('y')) {
+          const coef = t.replace('y','');
+          let c;
+          if (coef === '' || coef === '+') c = 1;
+          else if (coef === '-') c = -1;
+          else c = numFromStr(coef);
+          by += c;
+        } else {
+          ct += numFromStr(t);
+        }
+      }
+      return { ax, by, ct };
+    }
+
+    // Para ecuación en x: ax + b = c → a*x + (b-c) = 0
+    function parseLinearX(eq) {
+      if (!eq.includes('=')) throw new Error('La ecuación debe contener "=".');
+      const [lhs, rhs] = eq.split('=');
+      const L = parseExprXY(lhs), R = parseExprXY(rhs);
+      const a = L.ax - R.ax;       // coeficiente de x
+      const b = L.ct - R.ct;       // constante en LHS - RHS (sin y)
+      if (Math.abs(L.by - R.by) > 1e-12) throw new Error('Solo se admite la variable x en esta sección.');
+      return { a, b };
+    }
+
+    // Para sistemas: ax + by = c → (ax_l - ax_r) x + (by_l - by_r) y = (ct_r - ct_l)
+    function parseLinearXY(eq) {
+      if (!eq.includes('=')) throw new Error('Cada ecuación debe contener "=".');
+      const [lhs, rhs] = eq.split('=');
+      const L = parseExprXY(lhs), R = parseExprXY(rhs);
+      const a = L.ax - R.ax;
+      const b = L.by - R.by;
+      const c = R.ct - L.ct;
+      return { a, b, c };
+    }
+
+    // Canvas y dibujo
+    const CANVAS = document.getElementById('grafica');
+    const CTX = CANVAS.getContext('2d');
+    const SCALE = 25, CX = CANVAS.width/2, CY = CANVAS.height/2;
+
+    function limpiarCanvas(){
+      CTX.clearRect(0,0,CANVAS.width,CANVAS.height);
+      CTX.strokeStyle="#000"; CTX.lineWidth = 1;
+      CTX.beginPath();
+      CTX.moveTo(CX,0); CTX.lineTo(CX,CANVAS.height);
+      CTX.moveTo(0,CY); CTX.lineTo(CANVAS.width,CY);
+      CTX.stroke();
+    }
+    function dibujarRectaY(m,n,color){
+      CTX.strokeStyle=color; CTX.lineWidth = 2;
+      CTX.beginPath(); let started=false;
+      for(let px=0;px<=CANVAS.width;px++){
+        const x=(px-CX)/SCALE, y=m*x+n, py=CY-y*SCALE;
+        if(!started){CTX.moveTo(px,py); started=true;} else CTX.lineTo(px,py);
+      }
+      CTX.stroke();
+    }
+    function dibujarRectaVertical(x0,color){
+      const px=CX+x0*SCALE;
+      CTX.strokeStyle=color; CTX.lineWidth = 2;
+      CTX.beginPath(); CTX.moveTo(px,0); CTX.lineTo(px,CANVAS.height); CTX.stroke();
+    }
+    function dibujarPunto(x,y,color='red'){
+      const px=CX+x*SCALE, py=CY-y*SCALE;
+      CTX.fillStyle=color; CTX.beginPath(); CTX.arc(px,py,5,0,2*Math.PI); CTX.fill();
+    }
+
+    // Resolver ecuación de primer grado
+    function resolverEcuacion(){
+      const box = document.getElementById('res-eq1'); box.innerHTML = '';
+      const raw = document.getElementById('eq1').value;
+      try {
+        const { a, b } = parseLinearX(raw);
+        if (Math.abs(a) < 1e-12 && Math.abs(b) < 1e-12) {
+          box.innerHTML = '<div>Infinitas soluciones.</div>'; limpiarCanvas(); return;
+        }
+        if (Math.abs(a) < 1e-12) {
+          box.innerHTML = '<div>Sin solución.</div>'; limpiarCanvas(); return;
+        }
+        const xSol = -b / a;
+        box.innerHTML = `<p><b>Forma:</b> ${formatNumber(a)}x + ${formatNumber(b)} = 0</p>
+                         <p><b>Solución:</b> x = ${formatNumber(xSol)}</p>`;
+        limpiarCanvas();
+        // Graficamos y = a x + b y el punto donde cruza el eje X
+        dibujarRectaY(a, b, '#2575fc');
+        dibujarPunto(xSol, 0);
+      } catch (e) {
+        box.innerHTML = `<div class="error">${e.message}</div>`;
+        limpiarCanvas();
+      }
+    }
+
+    // Resolver sistema 2x2
+    function resolverSistema(){
+      const box = document.getElementById('res-sys'); box.innerHTML = '';
+      const e1 = document.getElementById('sys-eq1').value;
+      const e2 = document.getElementById('sys-eq2').value;
+      const metodo = document.getElementById('metodo').value;
+
+      try {
+        const r1 = parseLinearXY(e1);
+        const r2 = parseLinearXY(e2);
+
+        const a=r1.a, b=r1.b, c=r1.c;
+        const d=r2.a, e=r2.b, f=r2.c;
+
+        let pasos = '';
+        if (metodo === 'sustitucion') {
+          if (Math.abs(a) > 1e-12) {
+            pasos += `<p><b>Sustitución:</b> x = (c − b·y)/a ⇒ sustituir en (2) y despejar y.</p>`;
+          } else {
+            pasos += `<p><b>Sustitución:</b> y = (c − a·x)/b ⇒ sustituir en (2) y despejar x.</p>`;
+          }
+        } else if (metodo === 'igualacion') {
+          pasos += `<p><b>Igualación:</b> despejar la misma variable en ambas ecuaciones e igualar.</p>`;
+        } else {
+          pasos += `<p><b>Reducción:</b> multiplicar para igualar coeficientes y eliminar una variable.</p>`;
+        }
+
+        const det = a*e - b*d;
+        if (Math.abs(det) < 1e-12) {
+          box.innerHTML = `<p>(1) ${formatNumber(a)}x + ${formatNumber(b)}y = ${formatNumber(c)}</p>
+                           <p>(2) ${formatNumber(d)}x + ${formatNumber(e)}y = ${formatNumber(f)}</p>
+                           ${pasos}
+                           <p class="error">Sistema sin solución única (det≈0).</p>`;
+          limpiarCanvas();
+          return;
+        }
+        const xSol = (c*e - b*f) / det;
+        const ySol = (a*f - c*d) / det;
+
+        box.innerHTML = `<p>(1) ${formatNumber(a)}x + ${formatNumber(b)}y = ${formatNumber(c)}</p>
+                         <p>(2) ${formatNumber(d)}x + ${formatNumber(e)}y = ${formatNumber(f)}</p>
+                         ${pasos}
+                         <p><b>Solución:</b> x = ${formatNumber(xSol)}, y = ${formatNumber(ySol)}</p>`;
+
+        // Gráfica
+        limpiarCanvas();
+        // Recta 1: a x + b y = c
+        if (Math.abs(b) < 1e-12) { dibujarRectaVertical(c/a, '#2575fc'); }
+        else { dibujarRectaY(-a/b, c/b, '#2575fc'); }
+        // Recta 2: d x + e y = f
+        if (Math.abs(e) < 1e-12) { dibujarRectaVertical(f/d, '#6a11cb'); }
+        else { dibujarRectaY(-d/e, f/e, '#6a11cb'); }
+        dibujarPunto(xSol, ySol);
+      } catch (e) {
+        box.innerHTML = `<div class="error">${e.message}</div>`;
+        limpiarCanvas();
+      }
+    }
+  </script>
+</body>
+</html>
